@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Schräglage</title>
+<meta name="theme-color" content="#0d1117">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+/* Layout: Cockpit-Instrument oben, Kennwerte darunter, Bedienleiste unten am Daumen */
+:root{
+  --bg:#0b0f14; --panel:#131a22; --line:#243040; --fg:#e8edf2; --dim:#8a97a6;
+  --accent:#ffb020; --rec:#ff4d4d; --ok:#3ccf8e;
+  --b1:#5fb3ff; --b2:#3ccf8e; --b3:#ffb020; --b4:#ff6a3d; --b5:#ff2e63;
+  --num:"Roboto Condensed","Arial Narrow",system-ui,sans-serif;
+  --txt:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.4 var(--txt);
+  padding:env(safe-area-inset-top,0) max(12px,env(safe-area-inset-right,0px)) env(safe-area-inset-bottom,0) max(12px,env(safe-area-inset-left,0px));
+  display:flex;flex-direction:column;-webkit-tap-highlight-color:transparent;user-select:none}
+[hidden]{display:none!important}
+button{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;cursor:pointer}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);color:#1a1100;border-color:var(--accent);font-weight:700}
+button.primary.recording{background:var(--rec);border-color:var(--rec);color:#fff}
+button.danger{border-color:var(--rec);color:var(--rec)}
+button:disabled{opacity:.4}
+
+header{display:flex;align-items:center;gap:8px;padding:10px 0 6px}
+header h1{font:700 17px/1 var(--txt);margin:0;letter-spacing:.02em;flex:1}
+.chip{font-size:12px;padding:4px 8px;border-radius:99px;border:1px solid var(--line);color:var(--dim);white-space:nowrap;font-variant-numeric:tabular-nums}
+.chip.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 50%,transparent)}
+.chip.warn{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 50%,transparent)}
+.chip.rec{color:#fff;background:var(--rec);border-color:var(--rec)}
+
+main{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column}
+nav{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:8px 0 10px}
+nav button{padding:10px 4px;font-size:14px;color:var(--dim)}
+nav button[aria-current="page"]{color:var(--fg);border-color:var(--accent)}
+
+/* Messen */
+#viewLive{flex:1;display:flex;flex-direction:column}
+#live{flex:1;display:flex;flex-direction:column;gap:12px}
+.gauge{position:relative;width:100%;max-width:520px;margin:auto auto 0}
+.gauge svg{display:block;width:100%;height:auto}
+.readout{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:14px;margin-bottom:auto}
+.readout .side{font:700 26px var(--num);color:var(--line);text-align:right}
+.readout .side:last-child{text-align:left}
+.readout .side.on{color:var(--accent)}
+.readout .num{display:flex;align-items:flex-start}
+.readout .val{font:700 clamp(72px,26vw,132px)/1 var(--num);font-variant-numeric:tabular-nums;width:2ch;text-align:right}
+.readout .deg{font:400 clamp(36px,10vw,56px)/1 var(--num);color:var(--dim);width:.6em}
+.stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 10px;text-align:center}
+.stat .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.stat .v{font:700 30px/1.1 var(--num);font-variant-numeric:tabular-nums}
+.stat .u{font-size:13px;color:var(--dim);font-weight:400}
+.actions{display:grid;grid-template-columns:1fr 1.6fr 1fr;gap:8px}
+.actions button{padding:16px 8px}
+.hint{font-size:13px;color:var(--dim);text-align:center;margin:0}
+.hint.warn{color:var(--accent)}
+
+@media (orientation:landscape) and (max-height:500px){
+  #live{display:grid;grid-template-columns:1.2fr 1fr;grid-template-rows:1fr auto auto auto;column-gap:16px;row-gap:8px}
+  .gauge{grid-row:1/5;max-width:none;margin:auto 0}
+  .readout{grid-column:2;margin:0}
+  .stats,.actions,.hint{grid-column:2}
+  .readout .val{font-size:clamp(56px,16vh,96px)}
+}
+
+/* Fahrten */
+.list{display:flex;flex-direction:column;gap:8px}
+.ride{display:grid;grid-template-columns:1fr auto;gap:2px 12px;text-align:left;padding:12px 14px}
+.ride .t{font-weight:600}
+.ride .s{font-size:13px;color:var(--dim);font-variant-numeric:tabular-nums}
+.ride .m{grid-row:1/3;grid-column:2;align-self:center;font:700 22px var(--num);font-variant-numeric:tabular-nums;text-align:right}
+.ride .m small{display:block;font:400 11px var(--txt);color:var(--dim)}
+.empty{color:var(--dim);text-align:center;padding:40px 10px;line-height:1.6}
+.detail{display:flex;flex-direction:column;gap:12px;padding-bottom:12px}
+.detail h2{font-size:17px;margin:0}
+.kv{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px}
+.card h3{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:0 0 6px;font-weight:600}
+canvas{display:block;width:100%}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--dim);margin-top:6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.row button{flex:1}
+
+/* Einstellungen */
+.settings{display:flex;flex-direction:column;gap:10px;padding-bottom:12px}
+.settings label.opt{display:flex;gap:12px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+.settings input[type=checkbox]{width:22px;height:22px;accent-color:var(--accent);flex:none;margin:1px 0 0}
+.settings .d{font-size:13px;color:var(--dim)}
+.settings p{margin:0;color:var(--dim);font-size:13px;line-height:1.5}
+.settings h3{margin:8px 0 0;font-size:14px}
+
+/* Kalibrier-Overlay */
+.overlay{position:fixed;inset:0;background:color-mix(in srgb,var(--bg) 92%,transparent);display:flex;align-items:center;justify-content:center;padding:24px;z-index:10}
+.overlay .box{max-width:380px;text-align:center;display:flex;flex-direction:column;gap:14px}
+.overlay .big{font:700 48px var(--num)}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .1s linear}
+</style>
+</head>
+<body>
+<header>
+  <h1>Schräglage</h1>
+  <span class="chip" id="chipSensor">Sensor …</span>
+  <span class="chip" id="chipGps">GPS aus</span>
+  <span class="chip rec" id="chipRec" hidden>● 00:00</span>
+</header>
+
+<main>
+  <section id="viewLive">
+    <div id="live">
+      <div class="gauge">
+        <svg viewBox="-170 -175 340 200" aria-hidden="true">
+          <g id="ticks"></g>
+          <path id="arcL" fill="none" stroke="var(--accent)" stroke-width="7" stroke-linecap="round"/>
+          <path id="arcR" fill="none" stroke="var(--accent)" stroke-width="7" stroke-linecap="round"/>
+          <g id="maxMarkL"><path d="M0,-162 l-6,-11 h12z" fill="var(--rec)"/></g>
+          <g id="maxMarkR"><path d="M0,-162 l-6,-11 h12z" fill="var(--rec)"/></g>
+          <line x1="-150" y1="0" x2="150" y2="0" stroke="var(--line)" stroke-width="2"/>
+          <g id="bike"><g transform="scale(.78)">
+            <!-- Motorrad von hinten: Reifen, Heck, Fahrer -->
+            <rect x="-9" y="-46" width="18" height="46" rx="8" fill="#2a3644"/>
+            <rect x="-30" y="-74" width="60" height="24" rx="10" fill="#3a4a5c"/>
+            <rect x="-12" y="-70" width="24" height="8" rx="3" fill="var(--rec)"/>
+            <path d="M-26,-78 Q-30,-112 0,-120 Q30,-112 26,-78 Z" fill="#55687e"/>
+            <circle cx="0" cy="-134" r="17" fill="var(--fg)"/>
+            <rect x="-11" y="-140" width="22" height="7" rx="3" fill="#0b0f14"/>
+            </g>
+            <line x1="0" y1="-120" x2="0" y2="-146" stroke="var(--accent)" stroke-width="4" stroke-linecap="round"/>
+          </g>
+        </svg>
+      </div>
+      <div class="readout" aria-live="off">
+        <span class="side" id="sideL">L</span>
+        <span class="num"><span class="val" id="leanVal">0</span><span class="deg">°</span></span>
+        <span class="side" id="sideR">R</span>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="k">Max links</div><div class="v" id="maxL">0<span class="u">°</span></div></div>
+        <div class="stat"><div class="k">Tempo</div><div class="v" id="speed">–<span class="u"> km/h</span></div></div>
+        <div class="stat"><div class="k">Max rechts</div><div class="v" id="maxR">0<span class="u">°</span></div></div>
+      </div>
+      <div class="actions">
+        <button id="btnCal">Kalibrieren</button>
+        <button id="btnRec" class="primary">Aufnahme starten</button>
+        <button id="btnReset">Max zurück</button>
+      </div>
+      <p class="hint" id="hint"></p>
+    </div>
+  </section>
+
+  <section id="viewRides" hidden>
+    <div id="rideList" class="list"></div>
+    <div id="rideDetail" class="detail" hidden></div>
+  </section>
+
+  <section id="viewSettings" hidden>
+    <div class="settings">
+      <label class="opt"><input type="checkbox" id="optSwap">
+        <span>Links und rechts tauschen<br><span class="d">Nur nötig, wenn die Anzeige spiegelverkehrt ist, z.&nbsp;B. bei flach liegendem Handy.</span></span></label>
+      <label class="opt"><input type="checkbox" id="optGps" checked>
+        <span>GPS-Tempo verwenden<br><span class="d">Verbessert die Genauigkeit in langen Kurven deutlich. Ohne GPS wird nur auf Geraden nachkorrigiert.</span></span></label>
+      <label class="opt"><input type="checkbox" id="optDemo">
+        <span>Demo-Modus<br><span class="d">Simuliert eine kurvige Landstraße, um die Anzeige ohne Fahrt auszuprobieren.</span></span></label>
+      <h3>So funktioniert die Messung</h3>
+      <p>Ein Neigungssensor allein misst in der Kurve fast 0°, weil Schwerkraft und Fliehkraft zusammen genau entlang des Motorrads wirken. Die App rechnet deshalb mit dem Gyroskop: Es misst, wie schnell sich das Motorrad zur Seite neigt, und daraus ergibt sich der Winkel. Damit sich kein Fehler aufsummiert, gleicht die App laufend ab: mit dem GPS-Tempo und der Kurvendrehrate (tan&nbsp;φ&nbsp;=&nbsp;v·ω&nbsp;/&nbsp;g), und auf Geraden mit 0°.</p>
+      <h3>Montage</h3>
+      <p>Das Handy muss fest sitzen, am besten an einem Teil, das nicht mitlenkt (Cockpit, Tank, Gabelbrücke ist schon ein Kompromiss). Hochkant oder quer ist egal. Nach jedem Umsetzen einmal kalibrieren: Motorrad gerade hinstellen (nicht auf dem Seitenständer), dann <b>Kalibrieren</b> tippen.</p>
+      <h3>Sicherheit</h3>
+      <p>Während der Fahrt nicht bedienen und nicht auf das Display schauen. Aufnahme vor der Fahrt starten und die Werte danach unter <b>Fahrten</b> ansehen. Die Werte sind Schätzungen und können je nach Handy einige Grad abweichen.</p>
+      <p id="buildInfo"></p>
+    </div>
+  </section>
+</main>
+
+<nav>
+  <button id="tabLive" aria-current="page">Messen</button>
+  <button id="tabRides">Fahrten</button>
+  <button id="tabSettings">Einstellungen</button>
+</nav>
+
+<div class="overlay" id="calOverlay" hidden>
+  <div class="box">
+    <div>Motorrad gerade hinstellen und nicht berühren.</div>
+    <div class="big" id="calCount">3</div>
+    <div class="bar"><i id="calBar"></i></div>
+    <div class="hint" id="calMsg"></div>
+    <button id="calCancel">Abbrechen</button>
+  </div>
+</div>
+
+<script src="lean.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
