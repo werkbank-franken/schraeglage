@@ -1,5 +1,5 @@
 'use strict';
-const VERSION = '1.0';
+const VERSION = '1.1';
 const $ = s => document.querySelector(s);
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -14,6 +14,8 @@ let lastT = null, leanDisp = 0, leanMax = 0;
 let maxL = 0, maxR = 0;
 let speed = null, speedT = 0, pos = null, gpsAcc = null, gpsWatch = null;
 let sensorSeen = false, gyroOK = false, lastMotion = 0;
+let gyroSrc = null, lastGyro = null, sensorErr = null, motionCount = 0, motionHz = 0;
+let gpsT = 0, gpsHead = null, gpsLean = 0;
 let rec = null, lastSample = 0;
 let demo = null;
 let calib = null;
@@ -29,7 +31,12 @@ function haversine(a, b) {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 }
-const BANDS = [[20, 'var(--b1)', '#5fb3ff', 'unter 20°'], [30, 'var(--b2)', '#3ccf8e', '20–30°'], [40, 'var(--b3)', '#ffb020', '30–40°'], [50, 'var(--b4)', '#ff6a3d', '40–50°'], [999, 'var(--b5)', '#ff2e63', 'über 50°']];
+function bearing(a, b) {
+  const r = Math.PI / 180, y = Math.sin((b[1] - a[1]) * r) * Math.cos(b[0] * r);
+  const x = Math.cos(a[0] * r) * Math.sin(b[0] * r) - Math.sin(a[0] * r) * Math.cos(b[0] * r) * Math.cos((b[1] - a[1]) * r);
+  return (Math.atan2(y, x) / r + 360) % 360;
+}
+const BANDS =[[20, 'var(--b1)', '#5fb3ff', 'unter 20°'], [30, 'var(--b2)', '#3ccf8e', '20–30°'], [40, 'var(--b3)', '#ffb020', '30–40°'], [50, 'var(--b4)', '#ff6a3d', '40–50°'], [999, 'var(--b5)', '#ff2e63', 'über 50°']];
 const bandColor = a => BANDS.find(b => Math.abs(a) < b[0])[2];
 
 // ---------- Speicher (IndexedDB) ----------
@@ -86,14 +93,16 @@ function updateStatus() {
   const now = performance.now();
   if (demo) setChip('#chipSensor', 'Demo', 'warn');
   else if (!sensorSeen) setChip('#chipSensor', 'Kein Sensor', 'warn');
-  else if (!gyroOK) setChip('#chipSensor', 'Kein Gyro', 'warn');
-  else if (now - lastMotion > 1500) setChip('#chipSensor', 'Pausiert', 'warn');
+  else if (!gyroOK) setChip('#chipSensor', 'GPS-Modus', 'warn');
+  else if (now - lastMotion > 1500 && gyroSrc === 'devicemotion') setChip('#chipSensor', 'Pausiert', 'warn');
   else setChip('#chipSensor', 'Sensor OK', 'ok');
 
   if (demo) setChip('#chipGps', 'GPS simuliert', 'warn');
   else if (!opts.gps) setChip('#chipGps', 'GPS aus');
-  else if (speedFresh() != null) setChip('#chipGps', 'GPS ±' + Math.round(gpsAcc || 0) + ' m', 'ok');
+  else if (gpsT && now - gpsT < 15000) setChip('#chipGps', 'GPS ±' + Math.round(gpsAcc || 0) + ' m', gpsAcc < 25 ? 'ok' : 'warn');
   else setChip('#chipGps', 'GPS sucht', 'warn');
+
+  $('#diag').textContent = `Sensoren: Bewegung ${sensorSeen ? 'ja (' + motionHz + ' Hz)' : 'nein'}, Gyroskop ${gyroOK ? 'ja (' + (gyroSrc === 'sensor' ? 'Sensor-API' : 'DeviceMotion') + ')' : 'nein'}${sensorErr ? ', Sensor-API: ' + sensorErr : ''}, GPS ${gpsT ? 'ja' : 'nein'}.`;
 
   const ch = $('#chipRec');
   ch.hidden = !rec;
@@ -101,7 +110,7 @@ function updateStatus() {
 
   let hint = '', warn = false;
   if (!demo && !sensorSeen) { hint = 'Keine Bewegungssensoren gefunden. Die Seite muss über https geöffnet werden.'; warn = true; }
-  else if (!demo && !gyroOK) { hint = 'Dieses Handy liefert keine Gyroskop-Daten. Ohne Gyroskop ist keine Messung möglich.'; warn = true; }
+  else if (!demo && !gyroOK) { hint = 'Dein Handy liefert keine Gyroskop-Daten. Die Schräglage wird deshalb nur aus GPS-Tempo und Kurvenradius geschätzt: ungenauer und 1–2 s verzögert, im Stand immer 0°.'; warn = true; }
   else if (!cal && !demo) { hint = 'Noch nicht kalibriert. Motorrad gerade hinstellen und „Kalibrieren“ tippen.'; warn = true; }
   else if (rec) hint = 'Aufnahme läuft. Display nicht ausschalten, App nicht wechseln.';
   else hint = 'Aufnahme vor der Fahrt starten, Werte danach unter „Fahrten“ ansehen.';
@@ -120,7 +129,11 @@ function process(w, t) {
   const dt = t - lastT; lastT = t;
   if (dt <= 0 || dt > 0.5) return;
   const lean = est.step(activeCal(), w, speedFresh(), dt);
-  leanDisp += (lean - leanDisp) * Math.min(1, dt / 0.12);
+  afterLean(lean, t, dt, 0.12);
+}
+
+function afterLean(lean, t, dt, smooth) {
+  leanDisp += (lean - leanDisp) * Math.min(1, dt / smooth);
   // Maximalwerte über ~0,3 s geglättet, damit Schläge der Fahrbahn nicht zählen
   leanMax += (lean - leanMax) * Math.min(1, dt / 0.3);
   if (leanMax < 0) maxL = Math.max(maxL, -leanMax); else maxR = Math.max(maxR, leanMax);
@@ -129,20 +142,49 @@ function process(w, t) {
 
 function onMotion(e) {
   if (demo) return;
-  sensorSeen = true; lastMotion = performance.now();
+  sensorSeen = true; lastMotion = performance.now(); motionCount++;
   const rr = e.rotationRate, a = e.accelerationIncludingGravity;
-  if (!rr || rr.alpha == null) { gyroOK = false; return; }
-  gyroOK = true;
-  const raw = [rr.beta || 0, rr.gamma || 0, rr.alpha || 0];
-  if (calib) { calibSample(raw, a ? [a.x || 0, a.y || 0, a.z || 0] : null); return; }
-  const b = activeCal().bias || [0, 0, 0];
-  process([raw[0] - b[0], raw[1] - b[1], raw[2] - b[2]], e.timeStamp / 1000);
+  const acc = a && a.x != null ? [a.x, a.y, a.z] : null;
+  const hasRR = !!(rr && rr.alpha != null && rr.beta != null);
+  if (hasRR && gyroSrc !== 'sensor') { gyroOK = true; gyroSrc = 'devicemotion'; lastGyro = [rr.beta, rr.gamma, rr.alpha]; }
+  if (calib) { calibSample(gyroOK ? lastGyro : null, acc); return; }
+  if (gyroSrc === 'devicemotion' && hasRR) {
+    const b = activeCal().bias || [0, 0, 0];
+    process([lastGyro[0] - b[0], lastGyro[1] - b[1], lastGyro[2] - b[2]], e.timeStamp / 1000);
+  }
 }
+
+// Zweiter Weg zum Gyroskop: Generic Sensor API (bei manchen Handys liefert DeviceMotion keine Drehraten)
+function tryGyroscope() {
+  if (!('Gyroscope' in window)) { sensorErr = 'nicht vorhanden'; return; }
+  try {
+    const g = new Gyroscope({ frequency: 60 });
+    g.addEventListener('reading', () => {
+      if (gyroSrc === 'devicemotion' || g.x == null) return;
+      gyroSrc = 'sensor'; gyroOK = true; sensorErr = null; lastMotion = performance.now();
+      const R = 180 / Math.PI; lastGyro = [g.x * R, g.y * R, g.z * R];
+      if (calib || demo) return;
+      const b = activeCal().bias || [0, 0, 0];
+      process([lastGyro[0] - b[0], lastGyro[1] - b[1], lastGyro[2] - b[2]], g.timestamp / 1000);
+    });
+    g.addEventListener('error', e => { sensorErr = (e.error && (e.error.name + ': ' + e.error.message)) || 'Fehler'; });
+    g.start();
+  } catch (e) { sensorErr = e.name + ': ' + e.message; }
+}
+
+// Ersatz ohne Gyroskop: Schräglage aus GPS-Tempo und Richtungsänderung (tan φ = v·ω/g)
+setInterval(() => {
+  if (demo || gyroOK) return;
+  const t = performance.now() / 1000, v = speedFresh();
+  const target = v != null && v > 4 ? gpsLean : 0;
+  afterLean(target, t, 0.05, 0.6);
+}, 50);
+setInterval(() => { motionHz = motionCount; motionCount = 0; }, 1000);
 
 // ---------- Kalibrierung ----------
 function startCalibration() {
   if (demo) { toggleDemo(false); }
-  calib = { n: 0, acc: [0, 0, 0], acc2: 0, gyr: [0, 0, 0], gyr2: 0, t0: performance.now(), wait: 1000, dur: 2000 };
+  calib = { n: 0, ng: 0, acc: [0, 0, 0], acc2: 0, gyr: [0, 0, 0], gyr2: 0, t0: performance.now(), wait: 1000, dur: 2000 };
   $('#calMsg').textContent = ''; $('#calBar').style.width = '0';
   $('#calOverlay').hidden = false;
   if (!sensorSeen) setTimeout(() => { if (calib && !sensorSeen) failCal('Keine Sensordaten. Wird die Seite über https geöffnet?'); }, 2500);
@@ -153,19 +195,24 @@ function calibSample(w, acc) {
   $('#calCount').textContent = Math.max(0, Math.ceil(remain / 1000));
   if (el < calib.wait) return;               // Antippen ausklingen lassen
   $('#calBar').style.width = Math.min(100, (el - calib.wait) / calib.dur * 100) + '%';
-  if (!acc) return;
-  calib.n++;
-  for (let i = 0; i < 3; i++) { calib.acc[i] += acc[i]; calib.gyr[i] += w[i]; }
-  calib.acc2 += acc[0] ** 2 + acc[1] ** 2 + acc[2] ** 2;
-  calib.gyr2 += w[0] ** 2 + w[1] ** 2 + w[2] ** 2;
+  if (acc) {
+    calib.n++;
+    for (let i = 0; i < 3; i++) calib.acc[i] += acc[i];
+    calib.acc2 += acc[0] ** 2 + acc[1] ** 2 + acc[2] ** 2;
+  }
+  if (w) {
+    calib.ng++;
+    for (let i = 0; i < 3; i++) calib.gyr[i] += w[i];
+    calib.gyr2 += w[0] ** 2 + w[1] ** 2 + w[2] ** 2;
+  }
   if (remain <= 0) finishCal();
 }
 function finishCal() {
-  const c = calib, n = c.n;
-  if (n < 20) return failCal('Zu wenige Messwerte. Bitte erneut versuchen.');
-  const ma = c.acc.map(x => x / n), mg = c.gyr.map(x => x / n);
+  const c = calib, n = c.n, ng = c.ng;
+  if (n < 10) return failCal('Zu wenige Messwerte vom Beschleunigungssensor. Bitte erneut versuchen.');
+  const ma = c.acc.map(x => x / n), mg = ng ? c.gyr.map(x => x / ng) : [0, 0, 0];
   const varA = c.acc2 / n - (ma[0] ** 2 + ma[1] ** 2 + ma[2] ** 2);
-  const varG = c.gyr2 / n - (mg[0] ** 2 + mg[1] ** 2 + mg[2] ** 2);
+  const varG = ng ? c.gyr2 / ng - (mg[0] ** 2 + mg[1] ** 2 + mg[2] ** 2) : 0;
   const g = Math.hypot(...ma);
   if (varA > 0.15 || varG > 4 || g < 8 || g > 11.5) return failCal('Das Handy hat sich bewegt. Motorrad ruhig halten und noch einmal versuchen.');
   cal = Object.assign(Lean.axesFromGravity(ma, opts.swap), { bias: mg, acc: ma, t: Date.now() });
@@ -185,7 +232,17 @@ function startGps() {
     let v = c.speed;
     if ((v == null || isNaN(v)) && pos && now - pos.t < 5000) v = haversine(pos.p, here) / ((now - pos.t) / 1000);
     if (v != null && !isNaN(v)) { speed = v; speedT = now; }
-    gpsAcc = c.accuracy;
+    gpsAcc = c.accuracy; gpsT = now;
+    // Fahrtrichtung und deren Änderung für den GPS-Ersatzmodus
+    let hd = c.heading;
+    if ((hd == null || isNaN(hd)) && pos && haversine(pos.p, here) > 3) hd = bearing(pos.p, here);
+    if (v != null && v > 4 && hd != null && !isNaN(hd)) {
+      if (gpsHead) {
+        const dt = (now - gpsHead.t) / 1000, d = ((hd - gpsHead.h + 540) % 360) - 180;
+        if (dt > 0.3 && dt < 4) gpsLean = Math.max(-65, Math.min(65, Math.atan(v * d / dt * Math.PI / 180 / Lean.G) * 180 / Math.PI));
+      }
+      gpsHead = { h: hd, t: now };
+    } else { gpsHead = null; gpsLean = 0; }
     if (rec && c.accuracy < 30) {
       if (rec.lastFix) rec.dist += haversine(rec.lastFix, here);
       rec.lastFix = here;
@@ -421,6 +478,7 @@ $('#optDemo').onchange = e => toggleDemo(e.target.checked);
 $('#buildInfo').textContent = 'Version ' + VERSION;
 
 window.addEventListener('devicemotion', onMotion);
+tryGyroscope();
 startGps();
 if (opts.demo) toggleDemo(true);
 (function loop() { render(); requestAnimationFrame(loop); })();

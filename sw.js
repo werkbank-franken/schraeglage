@@ -1,5 +1,5 @@
 // Offline-Cache: App läuft auch ohne Netz (z. B. auf Strecken ohne Empfang)
-const CACHE = 'schraeglage-v1';
+const CACHE = 'schraeglage-v2';
 const FILES = ['./', 'index.html', 'app.js', 'lean.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'];
 
 self.addEventListener('install', e => {
