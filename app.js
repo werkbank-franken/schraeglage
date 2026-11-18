@@ -1,5 +1,5 @@
 'use strict';
-const VERSION = '1.1';
+const VERSION = '1.2';
 const $ = s => document.querySelector(s);
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -14,7 +14,7 @@ let lastT = null, leanDisp = 0, leanMax = 0;
 let maxL = 0, maxR = 0;
 let speed = null, speedT = 0, pos = null, gpsAcc = null, gpsWatch = null;
 let sensorSeen = false, gyroOK = false, lastMotion = 0;
-let gyroSrc = null, lastGyro = null, sensorErr = null, motionCount = 0, motionHz = 0;
+let accSeen = false, gyroSrc = null, lastGyro = null, sensorErr = null, motionCount = 0, motionHz = 0;
 let gpsT = 0, gpsHead = null, gpsLean = 0;
 let rec = null, lastSample = 0;
 let demo = null;
@@ -93,6 +93,7 @@ function updateStatus() {
   const now = performance.now();
   if (demo) setChip('#chipSensor', 'Demo', 'warn');
   else if (!sensorSeen) setChip('#chipSensor', 'Kein Sensor', 'warn');
+  else if (!gyroOK && sensorBlocked()) setChip('#chipSensor', 'Sensoren gesperrt', 'warn');
   else if (!gyroOK) setChip('#chipSensor', 'GPS-Modus', 'warn');
   else if (now - lastMotion > 1500 && gyroSrc === 'devicemotion') setChip('#chipSensor', 'Pausiert', 'warn');
   else setChip('#chipSensor', 'Sensor OK', 'ok');
@@ -110,6 +111,7 @@ function updateStatus() {
 
   let hint = '', warn = false;
   if (!demo && !sensorSeen) { hint = 'Keine Bewegungssensoren gefunden. Die Seite muss über https geöffnet werden.'; warn = true; }
+  else if (!demo && !gyroOK && sensorBlocked()) { hint = 'Chrome sperrt die Bewegungssensoren für diese Seite. Freigeben: Chrome → ⋮ → Einstellungen → Website-Einstellungen → Bewegungssensoren → erlauben, dann App neu starten. Bis dahin läuft der ungenauere GPS-Modus.'; warn = true; }
   else if (!demo && !gyroOK) { hint = 'Dein Handy liefert keine Gyroskop-Daten. Die Schräglage wird deshalb nur aus GPS-Tempo und Kurvenradius geschätzt: ungenauer und 1–2 s verzögert, im Stand immer 0°.'; warn = true; }
   else if (!cal && !demo) { hint = 'Noch nicht kalibriert. Motorrad gerade hinstellen und „Kalibrieren“ tippen.'; warn = true; }
   else if (rec) hint = 'Aufnahme läuft. Display nicht ausschalten, App nicht wechseln.';
@@ -145,6 +147,7 @@ function onMotion(e) {
   sensorSeen = true; lastMotion = performance.now(); motionCount++;
   const rr = e.rotationRate, a = e.accelerationIncludingGravity;
   const acc = a && a.x != null ? [a.x, a.y, a.z] : null;
+  if (acc) accSeen = true;
   const hasRR = !!(rr && rr.alpha != null && rr.beta != null);
   if (hasRR && gyroSrc !== 'sensor') { gyroOK = true; gyroSrc = 'devicemotion'; lastGyro = [rr.beta, rr.gamma, rr.alpha]; }
   if (calib) { calibSample(gyroOK ? lastGyro : null, acc); return; }
@@ -153,6 +156,9 @@ function onMotion(e) {
     process([lastGyro[0] - b[0], lastGyro[1] - b[1], lastGyro[2] - b[2]], e.timeStamp / 1000);
   }
 }
+
+// Chrome schickt bei gesperrten Sensoren nur ein einziges leeres Ereignis
+function sensorBlocked() { return (sensorSeen && !accSeen) || /NotAllowed/.test(sensorErr || ''); }
 
 // Zweiter Weg zum Gyroskop: Generic Sensor API (bei manchen Handys liefert DeviceMotion keine Drehraten)
 function tryGyroscope() {
