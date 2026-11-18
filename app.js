@@ -1,5 +1,5 @@
 'use strict';
-const VERSION = '1.2';
+const VERSION = '1.3';
 const $ = s => document.querySelector(s);
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -335,6 +335,7 @@ function toggleDemo(on) {
 
 // ---------- Fahrten ----------
 async function showRides() {
+  if (mapInst) { try { mapInst.remove(); } catch {} mapInst = null; }
   $('#rideDetail').hidden = true; const list = $('#rideList'); list.hidden = false;
   let rides = [];
   try { rides = await db.all(); } catch { list.innerHTML = '<div class="empty">Der Speicher des Browsers ist nicht verfügbar.</div>'; return; }
@@ -371,10 +372,12 @@ function showDetail(r) {
       <div class="stat"><div class="k">Strecke</div><div class="v">${km(r.dist)}<span class="u"> km</span></div></div>
       <div class="stat"><div class="k">Über 30°</div><div class="v">${Math.round((share[2] + share[3] + share[4]) / Math.max(1, s.a.length) * 100)}<span class="u"> %</span></div></div>
     </div>
+    ${hasGps ? `<div class="card mapcard" id="mapCard"><div class="maphead"><h3>Strecke auf der Karte</h3><button id="mapFull" class="small">Vollbild</button></div>
+      <div id="map" class="map"></div><canvas id="cvTrack" height="300" hidden></canvas>
+      <div class="legend">${BANDS.map(b => `<span><i style="background:${b[1]}"></i>${b[3]}</span>`).join('')}</div>
+      <p class="maphint" id="mapHint">Strecke antippen, um die Schräglage an dieser Stelle zu sehen.</p></div>` : ''}
     <div class="card"><h3>Schräglage über die Zeit</h3><canvas id="cvLean" height="200"></canvas>
       <div class="legend"><span>oben = rechts, unten = links</span></div></div>
-    ${hasGps ? `<div class="card"><h3>Strecke nach Schräglage</h3><canvas id="cvTrack" height="300"></canvas>
-      <div class="legend">${BANDS.map(b => `<span><i style="background:${b[1]}"></i>${b[3]}</span>`).join('')}</div></div>` : ''}
     <div class="card"><h3>Zeitanteil je Bereich</h3><canvas id="cvHist" height="140"></canvas></div>
     <div class="row"><button id="exp">Als CSV speichern</button><button id="del" class="danger">Löschen</button></div>
     <div class="row" id="delConfirm" hidden><button id="delYes" class="danger">Wirklich löschen</button><button id="delNo">Behalten</button></div>`;
@@ -385,8 +388,118 @@ function showDetail(r) {
   $('#delYes').onclick = async () => { try { await db.del(r.id); } catch {} showRides(); };
   requestAnimationFrame(() => {
     drawLeanChart($('#cvLean'), s);
-    if (hasGps) drawTrack($('#cvTrack'), s);
     drawHist($('#cvHist'), share, s.a.length);
+  });
+  if (hasGps) {
+    $('#mapFull').onclick = () => {
+      const full = $('#mapCard').classList.toggle('full');
+      $('#mapFull').textContent = full ? 'Schließen' : 'Vollbild';
+      if (mapInst) setTimeout(() => { mapInst.invalidateSize(); mapInst.fitBounds(mapInst._track, { padding: [30, 30] }); }, 50);
+    };
+    loadLeaflet().then(() => { try { drawMap(r); } catch (e) { console.error(e); throw e; } }).catch(() => {
+      // offline oder Karte nicht ladbar: einfache Streckenskizze statt Karte
+      $('#map').hidden = true; $('#mapFull').hidden = true;
+      $('#cvTrack').hidden = false; drawTrack($('#cvTrack'), s);
+      $('#mapHint').textContent = 'Karte nicht verfügbar (keine Internetverbindung). Angezeigt wird eine Skizze der Strecke.';
+    });
+  }
+}
+
+// ---------- Karte (Leaflet + OpenStreetMap) ----------
+let mapInst = null, leafletP = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (leafletP) return leafletP;
+  const base = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/';
+  leafletP = new Promise((res, rej) => {
+    const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = base + 'leaflet.css'; document.head.appendChild(css);
+    const js = document.createElement('script'); js.src = base + 'leaflet.js';
+    js.onload = () => window.L ? res() : rej(); js.onerror = () => { leafletP = null; js.remove(); rej(); };
+    document.head.appendChild(js);
+    setTimeout(() => { if (!window.L) { leafletP = null; rej(); } }, 10000);
+  });
+  return leafletP;
+}
+
+function drawMap(r) {
+  if (mapInst) { try { mapInst.remove(); } catch {} mapInst = null; }
+  const el = $('#map'); if (!el || !el.isConnected) return;
+  const s = r.s, idx = [];
+  for (let i = 0; i < s.lat.length; i++) if (s.lat[i] != null) idx.push(i);
+  if (idx.length < 2) return;
+  const map = L.map(el, { zoomControl: true, attributionControl: true, tap: true });
+  mapInst = map;
+  // Ausschnitt setzen, bevor Linien dazukommen (Leaflet braucht eine Ansicht)
+  map._track = L.latLngBounds(idx.map(i => [s.lat[i], s.lon[i]]));
+  map.fitBounds(map._track, { padding: [30, 30] });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-Mitwirkende'
+  }).addTo(map);
+
+  // Strecke in Abschnitte gleicher Farbe zerlegen
+  const group = L.featureGroup().addTo(map);
+  const bandOf = a => BANDS.findIndex(b => Math.abs(a) < b[0]);
+  let seg = [], band = null;
+  const flush = () => { if (seg.length > 1) L.polyline(seg, { color: BANDS[band][2], weight: 5, opacity: .95 }).addTo(group); };
+  for (const i of idx) {
+    const b = bandOf(s.a[i]), p = [s.lat[i], s.lon[i]];
+    if (band !== null && b !== band) { seg.push(p); flush(); seg = [p]; } else seg.push(p);
+    band = b;
+  }
+  flush();
+  // breite unsichtbare Linie zum leichteren Antippen
+  const hit = L.polyline(idx.map(i => [s.lat[i], s.lon[i]]), { weight: 24, opacity: 0 }).addTo(map);
+
+  const tmin = i => fmtDur(s.t[i]);
+  const vtxt = i => s.v[i] != null ? Math.round(s.v[i]) + ' km/h' : '';
+  const dot = (cls, label) => L.divIcon({ className: 'mk ' + cls, html: label || '', iconSize: [18, 18], iconAnchor: [9, 9] });
+
+  // markante Punkte suchen
+  let iL = -1, iR = -1, iV = -1;
+  for (const i of idx) {
+    if (iL < 0 || s.a[i] < s.a[iL]) iL = i;
+    if (iR < 0 || s.a[i] > s.a[iR]) iR = i;
+    if (s.v[i] != null && (iV < 0 || s.v[i] > s.v[iV])) iV = i;
+  }
+  const bubbles = [];
+  const bubble = (i, cls, html, pref) => bubbles.push({ m: L.marker([s.lat[i], s.lon[i]], { icon: dot(cls), zIndexOffset: 500 }).addTo(map), cls, html, pref });
+  // Sprechblasen so ausrichten, dass sie sich nicht überdecken (bei jedem Zoom neu)
+  const placeBubbles = () => {
+    const placed = [], W = 135, H = 72;
+    for (const b of bubbles) {
+      const p = map.latLngToContainerPoint(b.m.getLatLng());
+      const rect = (d, G) => d === 'left' ? [p.x - G - W, p.y - H / 2, p.x - G, p.y + H / 2]
+        : d === 'right' ? [p.x + G, p.y - H / 2, p.x + G + W, p.y + H / 2]
+        : d === 'top' ? [p.x - W / 2, p.y - G - H, p.x + W / 2, p.y - G] : [p.x - W / 2, p.y + G, p.x + W / 2, p.y + G + H];
+      const hits = r => placed.some(q => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1]);
+      let dir = b.pref, gap = 10;
+      search: for (const g of [10, 50, 90, 130, 170]) for (const d of [b.pref, 'right', 'left', 'top', 'bottom'])
+        if (!hits(rect(d, g))) { dir = d; gap = g; break search; }
+      placed.push(rect(dir, gap));
+      const o = gap - 2, off = { left: [-o, 0], right: [o, 0], top: [0, -o], bottom: [0, o] }[dir];
+      b.m.unbindTooltip().bindTooltip(b.html, { permanent: true, direction: dir, className: 'bubble ' + b.cls, offset: off });
+    }
+  };
+  map.on('zoomend', placeBubbles);
+  if (iL >= 0 && s.a[iL] < -1) bubble(iL, 'left', `<b>${Math.round(-s.a[iL])}° links</b><span>max. Schräglage</span><span>${[vtxt(iL), 'nach ' + tmin(iL)].filter(Boolean).join(' · ')}</span>`, 'left');
+  if (iR >= 0 && s.a[iR] > 1) bubble(iR, 'right', `<b>${Math.round(s.a[iR])}° rechts</b><span>max. Schräglage</span><span>${[vtxt(iR), 'nach ' + tmin(iR)].filter(Boolean).join(' · ')}</span>`, 'right');
+  if (iV >= 0) bubble(iV, 'speed', `<b>${Math.round(s.v[iV])} km/h</b><span>Höchsttempo</span><span>nach ${tmin(iV)}</span>`, 'top');
+  placeBubbles();
+
+  const first = idx[0], last = idx[idx.length - 1];
+  L.marker([s.lat[first], s.lon[first]], { icon: dot('start', 'S') }).addTo(map)
+    .bindPopup(`<b>Start</b><br>${fmtDate(r.start)}<br>${fmtDur(r.dur)} · ${km(r.dist)} km<br>max. ${Math.round(r.maxL)}° links · ${Math.round(r.maxR)}° rechts${r.vmax ? '<br>Höchsttempo ' + Math.round(r.vmax) + ' km/h' : ''}`);
+  L.marker([s.lat[last], s.lon[last]], { icon: dot('finish', 'Z') }).addTo(map)
+    .bindPopup(`<b>Ziel</b><br>nach ${fmtDur(s.t[last])}`);
+
+  // Antippen der Strecke: Werte an der nächstgelegenen Stelle
+  hit.on('click', e => {
+    let best = idx[0], bd = Infinity;
+    const k = Math.cos(e.latlng.lat * Math.PI / 180);
+    for (const i of idx) { const dy = s.lat[i] - e.latlng.lat, dx = (s.lon[i] - e.latlng.lng) * k, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = i; } }
+    const a = s.a[best], side = Math.abs(a) < 1 ? 'aufrecht' : (a < 0 ? 'links' : 'rechts');
+    L.popup().setLatLng([s.lat[best], s.lon[best]])
+      .setContent(`<b>${Math.round(Math.abs(a))}° ${side}</b><br>${[vtxt(best), 'nach ' + tmin(best)].filter(Boolean).join(' · ')}`).openOn(map);
   });
 }
 
